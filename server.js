@@ -9,12 +9,13 @@ const mammoth = require('mammoth');
 const Tesseract = require('tesseract.js');
 require('dotenv').config();
 const File = require('./models/File'); 
-
+const { encode } = require('gpt-3-encoder');
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+let storedParagraphs = [];
 
 const upload = multer({ dest: 'uploads/' }).single('file');
 const pdfExtract = new PDFExtract();
@@ -125,6 +126,8 @@ app.post('/upload', (req, res) => {
         formattedText: paragraphs.join('\n\n')
       });
 
+
+
     } catch (error) {
       console.error('Error processing file:', error.message);
       res.status(500).json({ error: `Failed to process file: ${error.message}` });
@@ -135,45 +138,130 @@ app.post('/upload', (req, res) => {
 });
 
 
-// Chat completion helper function
-async function getChatCompletion(query, paragraphs) {
-  try {
-    const prompt = `Act as a semantic search API. Given the following paragraphs:
 
-${paragraphs.join('\n\n')}
 
-Please answer the following question based on the content above: ${query}`;
+app.post('/api', (req, res) => {
+  console.log('Received upload request:', req.body);
 
-    console.log(`Prompt: ${prompt}`);
-
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: prompt }]
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-        }
-      }
-    );
-
-    if (response.data && response.data.choices && response.data.choices[0]) {
-      return response.data.choices[0].message.content;
-    } else {
-      console.error('Unexpected API response structure:', response.data);
-      throw new Error('Unexpected response structure from OpenAI API');
-    }
-  } catch (error) {
-    console.error('Error during chat completion:', error.message);
-    if (error.response) {
-      console.error('OpenAI API response status:', error.response.status);
-      console.error('OpenAI API response data:', error.response.data);
-    }
-    throw error;
+  let { extractedText } = req.body;
+  
+  if (!extractedText) {
+    console.error('Missing extractedText');
+    return res.status(400).json({ error: 'Missing extractedText' });
   }
+
+  try {
+    // Handle both string and array inputs
+    if (Array.isArray(extractedText)) {
+      extractedText = extractedText.join('\n\n');
+    } else if (typeof extractedText !== 'string') {
+      throw new Error('extractedText is neither a string nor an array');
+    }
+
+    // Convert the extractedText string into an array of paragraphs
+    storedParagraphs = extractedText.split('\n\n').filter(para => para.trim() !== '');
+    
+    console.log('Stored paragraphs:', storedParagraphs);
+
+    res.json({ 
+      message: 'Extracted text received and stored successfully', 
+      paragraphCount: storedParagraphs.length,
+      paragraphs: storedParagraphs
+    });
+  } catch (error) {
+    console.error('Error processing extractedText:', error);
+    res.status(500).json({ error: 'Error processing extracted text' });
+  }
+});
+
+
+
+async function getChatCompletion(query, paragraphs) {
+  const MAX_TOKENS = 8000;  
+  const CHUNK_OVERLAP = 100;  
+  
+  let allChunks = [];
+  let currentChunk = "";
+  let tokenCount = 0;
+
+  for (let paragraph of paragraphs) {
+    const paragraphTokens = encode(paragraph).length;
+    if (tokenCount + paragraphTokens > MAX_TOKENS) {
+      allChunks.push(currentChunk);
+      currentChunk = "";
+      tokenCount = 0;
+    }
+    currentChunk += paragraph + "\n\n";
+    tokenCount += paragraphTokens;
+  }
+  if (currentChunk) allChunks.push(currentChunk);
+
+  let responses = [];
+  for (let chunk of allChunks) {
+    const prompt = `Given the following text:\n\n${chunk}\n\nPlease answer the following question: ${query}`;
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model: 'gpt-4',
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 150
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+          }
+        }
+      );
+      responses.push(response.data.choices[0].message.content);
+    } catch (error) {
+      console.error('Error processing chunk:', error.message);
+    }
+  }
+
+  return responses.join("\n\n");
 }
+
+// Chat completion helper function
+// async function getChatCompletion(query, paragraphs) {
+//   try {
+//     const prompt = `Act as a semantic search API. Given the following paragraphs:
+
+// ${paragraphs.join('\n\n')}
+
+// Please answer the following question based on the content above: ${query}`;
+
+//     console.log(`Prompt: ${prompt}`);
+
+//     const response = await axios.post(
+//       'https://api.openai.com/v1/chat/completions',
+//       {
+//         model: 'gpt-4',
+//         messages: [{ role: 'user', content: prompt }],
+//         max_tokens: 150
+//       },
+//       {
+//         headers: {
+//           'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+//         }
+//       }
+//     );
+
+//     if (response.data && response.data.choices && response.data.choices[0]) {
+//       return response.data.choices[0].message.content;
+//     } else {
+//       console.error('Unexpected API response structure:', response.data);
+//       throw new Error('Unexpected response structure from OpenAI API');
+//     }
+//   } catch (error) {
+//     console.error('Error during chat completion:', error.message);
+//     if (error.response) {
+//       console.error('OpenAI API response status:', error.response.status);
+//       console.error('OpenAI API response data:', error.response.data);
+//     }
+//     throw error;
+//   }
+// }
 
 const mongoose = require('mongoose');
 
@@ -187,6 +275,8 @@ db.on('error', console.error.bind(console, 'connection error:'));
 db.once('open', () => {
   console.log('Connected to MongoDB');
 });
+
+
 
 
 app.post('/save-chat', async (req, res) => {
