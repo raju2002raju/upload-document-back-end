@@ -1,9 +1,18 @@
 const mongoose = require('mongoose');
 
-// File Schema (Embedded in User)
+// File Schema
 const fileSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  extractedText: { type: [String] }, 
+  userId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    required: false  // Make userId optional
+  },
+  name: { 
+    type: String, 
+    required: true,
+    unique: true  // Ensure unique file names
+  },
+  extractedText: { type: [String] },
   uploadTime: { type: Date, default: Date.now },
   chatHistory: [
     {
@@ -12,14 +21,8 @@ const fileSchema = new mongoose.Schema({
       timestamp: { type: Date, default: Date.now },
     },
   ],
-  userEmail: { type: String, required: true } 
 });
 
-const userSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  files: [fileSchema] 
-});
-
-const User = mongoose.models.User || mongoose.model('User', userSchema);
-
-module.exports = { User };
+// Create or retrieve the existing model
+const modelName = 'File';
+module.exports = mongoose.models[modelName] || mongoose.model(modelName, fileSchema);

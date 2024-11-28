@@ -7,9 +7,10 @@ const routes = require('./Routes/routes');
 const auth = require('./Routes/auth');
 const ForgotPassword = require('./Routes/forgotpassword')
 const profile = require('./Routes/profileUpdate')
+const OpenAi = require('./Routes/openAiKeyRoutes')
 
 const app = express();
-app.use(cors({ origin: "*" }));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 // MongoDB connection from environment variables
@@ -29,12 +30,13 @@ app.use('/', routes);
 app.use('/auth', auth);
 app.use('/api', ForgotPassword)
 app.use('/profile', profile)
+app.use('/api', OpenAi)
 
 app.get('/', (req, res) => {
   res.send('File Processing Server is running');
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });

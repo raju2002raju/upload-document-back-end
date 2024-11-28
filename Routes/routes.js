@@ -8,15 +8,25 @@ const mammoth = require('mammoth');
 const Tesseract = require('tesseract.js');
 const { encode } = require('gpt-3-encoder');
 const {connectToDatabase} = require('../utlis/database')
-const { User, File } = require('../models/File');
-const {PdfToImg} = require('pdf2image')
+const File = require('../models/File');
 
 const router = express.Router();
 const upload = multer({ dest: path.join(__dirname, '../uploads/') }).single('file');
 const pdfExtract = new PDFExtract();
 
 let storedParagraphs = [];
-
+const getApiKey = () => {
+  // Resolve the path relative to the current file
+  const keyFilePath = path.resolve(__dirname, '../Routes/updatekey.json');
+  if (fs.existsSync(keyFilePath)) {
+      const data = JSON.parse(fs.readFileSync(keyFilePath, 'utf-8'));
+      if (data.key) {
+          return data.key;
+      }
+      throw new Error('API key is missing .');
+  }
+  throw new Error(`API key file "${keyFilePath}" is missing or invalid.`);
+};
 
 const extractTextFromPdf = async (pdfPath) => {
   try {
@@ -97,6 +107,7 @@ async function getChatCompletion(query, paragraphs) {
   let responses = [];
   for (let chunk of allChunks) {
     const prompt = `Given the following text:\n\n${chunk}\n\nPlease answer the following question: ${query}`;
+    const apiKey = getApiKey(); // Fetch API key dynamically
     try {
       const response = await axios.post(
         'https://api.openai.com/v1/chat/completions',
@@ -107,7 +118,7 @@ async function getChatCompletion(query, paragraphs) {
         },
         {
           headers: {
-            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+            'Authorization': `Bearer ${apiKey}`
           }
         }
       );
@@ -134,11 +145,6 @@ router.post('/upload', async (req, res) => {
         return res.status(400).json({ error: 'No file uploaded.' });
       }
 
-      const userEmail = req.body.userEmail;
-      if (!userEmail) {
-        return res.status(400).json({ error: 'User email is required.' });
-      }
-
       const filePath = req.file.path;
       let extractedText = '';
 
@@ -154,37 +160,35 @@ router.post('/upload', async (req, res) => {
         }
 
         const paragraphs = splitTextIntoParagraphs(extractedText);
-        let user = await User.findOne({ email: userEmail });
-        if (!user) {
-          user = new User({ email: userEmail, files: [] });
-        }
+
+        // Optional: If you want to associate with a user, you can pass userId in the request
+        const userId = req.body.userId;
 
         // Check if a file with the same name already exists
-        const existingFileIndex = user.files.findIndex(file => file.name === req.file.originalname);
+        let file = await File.findOne({ name: req.file.originalname });
 
-        if (existingFileIndex !== -1) {
+        if (file) {
           // Update existing file
-          user.files[existingFileIndex].extractedText = paragraphs;
-          user.files[existingFileIndex].uploadTime = new Date();
-          // Preserve existing chat history
+          file.extractedText = paragraphs;
+          file.uploadTime = new Date();
+          if (userId) file.userId = userId;
         } else {
-          // Add new file
-          const newFile = {
+          // Create new file
+          file = new File({
             name: req.file.originalname,
             extractedText: paragraphs,
             uploadTime: new Date(),
-            userEmail: userEmail,
+            ...(userId && { userId }),  // Conditionally add userId if provided
             chatHistory: []
-          };
-          user.files.push(newFile);
+          });
         }
 
-        await user.save();
+        await file.save();
 
         res.json({
           success: true,
-          message: existingFileIndex !== -1 ? 'File updated successfully.' : 'File uploaded and processed successfully.',
-          file: user.files[existingFileIndex !== -1 ? existingFileIndex : user.files.length - 1],
+          message: file.isNew ? 'File uploaded and processed successfully.' : 'File updated successfully.',
+          file: file,
           paragraphs: paragraphs
         });
 
@@ -202,7 +206,6 @@ router.post('/upload', async (req, res) => {
     res.status(500).json({ error: 'Server error occurred' });
   }
 });
-
 router.post('/api', (req, res) => {
   console.log('Received upload request:', req.body);
 
@@ -236,23 +239,17 @@ router.post('/api', (req, res) => {
 });
 
 router.post('/save-chat', async (req, res) => {
-  const { userEmail, fileName, question, answer } = req.body;
-  if (!userEmail || !fileName || !question || !answer) {
+  const { fileName, question, answer } = req.body;
+  if (!fileName || !question || !answer) {
     return res.status(400).json({ error: 'Missing required fields.' });
   }
 
   try {
     await connectToDatabase(); 
-    const user = await User.findOne({ email: userEmail });
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    const file = user.files.find(f => f.name === fileName);
+    const file = await File.findOne({ name: fileName });
 
     if (!file) {
-      return res.status(404).json({ error: 'File not found for this user.' });
+      return res.status(404).json({ error: 'File not found.' });
     }
 
     file.chatHistory.push({
@@ -261,7 +258,7 @@ router.post('/save-chat', async (req, res) => {
       timestamp: new Date()
     });
 
-    await user.save();
+    await file.save();
 
     res.json({ message: 'Chat history saved successfully.' });
 
@@ -304,21 +301,9 @@ router.post('/process-file', (req, res) => {
 
 router.get('/get-chat-history/:fileName', async (req, res) => {
   const { fileName } = req.params;
-  const userEmail = req.headers['user-email']; 
-
-
-  if (!userEmail) {
-    return res.status(400).json({ error: 'User email is required.' });
-  }
 
   try {
-    const user = await User.findOne({ email: userEmail });
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    const file = user.files.find(file => file.name === fileName);
+    const file = await File.findOne({ name: fileName });
 
     if (!file) {
       return res.status(404).json({ error: 'File not found.' });
@@ -331,60 +316,11 @@ router.get('/get-chat-history/:fileName', async (req, res) => {
   }
 });
 
-
-// router.get('/get-filename-history', async (req, res) => {
-//   const userEmail = req.query.userEmail; 
-
-
-//   if (!userEmail) {
-//     return res.status(400).json({ error: 'User email is required.' });
-//   }
-
-//   try {
-//     const user = await User.findOne({ email: userEmail }).select('files.name files.extractedText files.createdAt -_id');
-
-//     if (!user) {
-//       return res.status(404).json({ error: 'User not found.' });
-//     }
-
-//     // Sort files by createdAt in descending order
-//     const files = user.files
-//       .map(file => ({
-//         name: file.name,
-//         extractedText: file.extractedText,
-//         createdAt: file.createdAt
-//       }))
-//       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); // Latest first
-
-//     res.status(200).json(files);
-//   } catch (error) {
-//     console.error('Error fetching file history:', error);
-//     res.status(500).json({ error: 'Server error occurred.' });
-//   }
-// });
-
 router.get('/get-filename-history', async (req, res) => {
-  const userEmail = req.query.userEmail; 
-
-  if (!userEmail) {
-    return res.status(400).json({ error: 'User email is required.' });
-  }
-
   try {
-    const user = await User.findOne({ email: userEmail }).select('files.name files.extractedText files.createdAt -_id');
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    // Sort files by createdAt in ascending order (oldest first)
-    const files = user.files
-      .map(file => ({
-        name: file.name,
-        extractedText: file.extractedText,
-        createdAt: file.createdAt
-      }))
-      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const files = await File.find({})
+      .select('name extractedText createdAt')
+      .sort({ createdAt: 1 });
 
     res.status(200).json(files);
   } catch (error) {
